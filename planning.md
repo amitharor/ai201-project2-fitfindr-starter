@@ -15,18 +15,23 @@ You must have at least 3 tools. The three required tools are listed — add any 
 ### Tool 1: search_listings
 
 **What it does:**
+
 <!-- Describe what this tool does in 1–2 sentences -->
 
 **Input parameters:**
+
 <!-- List each parameter, its type, and what it represents -->
+
 - `description` (str): ...
 - `size` (str): ...
 - `max_price` (float): ...
 
 **What it returns:**
+
 <!-- Describe the return value — what fields does a result contain? -->
 
 **What happens if it fails or returns nothing:**
+
 <!-- What should the agent do if no listings match? -->
 
 ---
@@ -34,17 +39,22 @@ You must have at least 3 tools. The three required tools are listed — add any 
 ### Tool 2: suggest_outfit
 
 **What it does:**
+
 <!-- Describe what this tool does in 1–2 sentences -->
 
 **Input parameters:**
+
 <!-- List each parameter, its type, and what it represents -->
+
 - `new_item` (dict): ...
 - `wardrobe` (dict): ...
 
 **What it returns:**
+
 <!-- Describe the return value -->
 
 **What happens if it fails or returns nothing:**
+
 <!-- What should the agent do if the wardrobe is empty or no outfit can be suggested? -->
 
 ---
@@ -52,16 +62,21 @@ You must have at least 3 tools. The three required tools are listed — add any 
 ### Tool 3: create_fit_card
 
 **What it does:**
+
 <!-- Describe what this tool does in 1–2 sentences -->
 
 **Input parameters:**
+
 <!-- List each parameter, its type, and what it represents -->
+
 - `outfit` (...): ...
 
 **What it returns:**
+
 <!-- Describe the return value -->
 
 **What happens if it fails or returns nothing:**
+
 <!-- What should the agent do if the outfit data is incomplete? -->
 
 ---
@@ -75,6 +90,7 @@ You must have at least 3 tools. The three required tools are listed — add any 
 ## Planning Loop
 
 **How does your agent decide which tool to call next?**
+
 <!-- Describe the logic your planning loop uses. What does it look at? What conditions change its behavior? How does it know when it's done? -->
 
 ---
@@ -82,6 +98,7 @@ You must have at least 3 tools. The three required tools are listed — add any 
 ## State Management
 
 **How does information from one tool get passed to the next?**
+
 <!-- Describe how your agent stores and accesses state within a session. What data is tracked? How is it passed between tool calls? -->
 
 ---
@@ -90,11 +107,11 @@ You must have at least 3 tools. The three required tools are listed — add any 
 
 For each tool, describe the specific failure mode you're handling and what the agent does in response.
 
-| Tool | Failure mode | Agent response |
-|------|-------------|----------------|
-| search_listings | No results match the query | |
-| suggest_outfit | Wardrobe is empty | |
-| create_fit_card | Outfit input is missing or incomplete | |
+| Tool            | Failure mode                          | Agent response |
+| --------------- | ------------------------------------- | -------------- |
+| search_listings | No results match the query            |                |
+| suggest_outfit  | Wardrobe is empty                     |                |
+| create_fit_card | Outfit input is missing or incomplete |                |
 
 ---
 
@@ -134,16 +151,22 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 Write out what a full user interaction looks like from start to finish — tool call by tool call. Use a specific example query.
 
+FitFindr takes my plain-English thrifting request and works through it step by step. It kicks off search_listings to pull matching secondhand pieces, and as long as something comes back it grabs the top hit and runs suggest_outfit to style it against my wardrobe, then create_fit_card to spit out a caption I'd actually post. Each tool hands its result to the next through session state, so I never have to re-type the item. If the search comes up empty it stops right there and tells me what to loosen instead of styling nothing, an empty wardrobe just falls back to general advice, and a missing outfit returns an error message instead of blowing up.
+
 **Example user query:** "I'm looking for a vintage graphic tee under $30. I mostly wear baggy jeans and chunky sneakers. What's out there and how would I style it?"
 
 **Step 1:**
+
 <!-- What does the agent do first? Which tool is called? With what input? -->
 
 **Step 2:**
+
 <!-- What happens next? What was returned from step 1? What tool is called now? -->
 
 **Step 3:**
+
 <!-- Continue until the full interaction is complete -->
 
 **Final output to user:**
+
 <!-- What does the user actually see at the end? -->
