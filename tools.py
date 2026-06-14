@@ -14,6 +14,8 @@ Tools:
 
 import os
 import re
+import statistics
+from collections import Counter
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -51,6 +53,18 @@ def _call_llm(prompt: str, temperature: float, max_tokens: int = 400) -> str:
 
 # Common words to ignore when scoring keyword overlap.
 _STOPWORDS = {"the", "and", "for", "with", "an", "of", "in", "to", "my", "i", "a"}
+
+
+def _size_matches(query_size: str, listing_size: str) -> bool:
+    """
+    Case-insensitive size match. Splits the listing size on whitespace and "/"
+    so "M" matches "S/M", and falls back to a substring check for formats like
+    "XL (oversized)". Returns False when the query size isn't found.
+    """
+    wanted = query_size.strip().lower()
+    listing_size = listing_size.lower()
+    tokens = re.split(r"[\s/]+", listing_size)
+    return wanted in tokens or wanted in listing_size
 
 
 # ── Tool 1: search_listings ───────────────────────────────────────────────────
@@ -96,14 +110,7 @@ def search_listings(
 
     # 2. Filter by size (case-insensitive) if provided.
     if size is not None:
-        wanted = size.strip().lower()
-        kept = []
-        for item in listings:
-            listing_size = item["size"].lower()
-            tokens = re.split(r"[\s/]+", listing_size)
-            if wanted in tokens or wanted in listing_size:
-                kept.append(item)
-        listings = kept
+        listings = [item for item in listings if _size_matches(size, item["size"])]
 
     # 3. Score remaining listings by keyword overlap with the description.
     query_tokens = {
@@ -135,7 +142,7 @@ def search_listings(
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
 
-def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
+def suggest_outfit(new_item: dict, wardrobe: dict, trends: dict | None = None) -> str:
     """
     Given a thrifted item and the user's wardrobe, suggest 1–2 complete outfits.
 
@@ -143,6 +150,9 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
         new_item: A listing dict (the item the user is considering buying).
         wardrobe: A wardrobe dict with an 'items' key containing a list of
                   wardrobe item dicts. May be empty — handle this gracefully.
+        trends:   Optional dict from check_trends() with a 'tags' list. When
+                  given, the suggestion leans into those currently-popular
+                  styles and names the trend it followed.
 
     Returns:
         A non-empty string with outfit suggestions.
@@ -166,6 +176,18 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
         f"style: {', '.join(new_item['style_tags'])})"
     )
 
+    # Optional trend nudge: ask the model to lean into popular styles and say so.
+    trend_tags = (trends or {}).get("tags") or []
+    if trend_tags:
+        trend_line = (
+            "\n\nCurrently trending styles: "
+            + ", ".join(trend_tags)
+            + ". Lean the look into the trending styles that fit this piece, and "
+            "name the trend you leaned on in one short phrase."
+        )
+    else:
+        trend_line = ""
+
     items = wardrobe.get("items", []) if wardrobe else []
 
     if not items:
@@ -176,6 +198,7 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
             f"Item: {item_desc}\n\n"
             "In 3 to 5 sentences, describe what kinds of pieces pair well with it, "
             "the vibe it suits, and one specific way to wear it. Be concrete and warm."
+            + trend_line
         )
     else:
         wardrobe_lines = "\n".join(
@@ -191,6 +214,7 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
             "Suggest 1 or 2 complete outfits that pair the new item with specific "
             "named pieces from their wardrobe. For each, add one quick styling tip "
             "(how to tuck, layer, roll, etc.). Keep it concise and concrete."
+            + trend_line
         )
 
     try:
@@ -258,3 +282,134 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
             f"thrifted this {new_item['title']} off {new_item['platform']} for "
             f"${new_item['price']} and it fits the vibe perfectly. full look soon ✨"
         )
+
+
+# ── Stretch Tool: compare_price ───────────────────────────────────────────────
+
+def compare_price(item: dict, listings: list[dict] | None = None) -> dict:
+    """
+    Estimate whether an item's price is fair, based on comparable listings in
+    the dataset (same category, ideally sharing a style tag).
+
+    Args:
+        item:     A listing dict to assess.
+        listings: Optional list of listings to compare against. Defaults to the
+                  full dataset via load_listings().
+
+    Returns:
+        A dict with the assessment and the reasoning behind it:
+        - verdict (str): "great deal", "fair", "above average", or "unknown"
+        - item_price (float)
+        - comparable_median (float | None)
+        - comparable_count (int)
+        - message (str): a human-readable explanation
+
+    Never raises. If there are too few comparable listings, returns the
+    "unknown" verdict with an explanatory message.
+    """
+    if listings is None:
+        listings = load_listings()
+
+    same_category = [
+        x for x in listings
+        if x["category"] == item["category"] and x["id"] != item["id"]
+    ]
+    # Prefer comparables that also share a style tag; fall back if too few.
+    item_tags = set(item.get("style_tags", []))
+    sharing = [x for x in same_category if item_tags & set(x.get("style_tags", []))]
+    comparables = sharing if len(sharing) >= 3 else same_category
+
+    price = item["price"]
+
+    if len(comparables) < 2:
+        return {
+            "verdict": "unknown",
+            "item_price": price,
+            "comparable_median": None,
+            "comparable_count": len(comparables),
+            "message": (
+                f"Not enough comparable listings to judge the ${price} price "
+                f"on this {item['category']} piece."
+            ),
+        }
+
+    median = round(statistics.median([x["price"] for x in comparables]), 2)
+    if price <= median * 0.85:
+        verdict = "great deal"
+    elif price <= median * 1.05:
+        verdict = "fair"
+    else:
+        verdict = "above average"
+
+    message = (
+        f"${price} vs a typical ${median} across {len(comparables)} similar "
+        f"{item['category']}, so this price looks {verdict}."
+    )
+    return {
+        "verdict": verdict,
+        "item_price": price,
+        "comparable_median": median,
+        "comparable_count": len(comparables),
+        "message": message,
+    }
+
+
+# ── Stretch Tool: check_trends ────────────────────────────────────────────────
+
+def check_trends(
+    size: str | None = None,
+    listings: list[dict] | None = None,
+    top_n: int = 5,
+) -> dict:
+    """
+    Surface what styles are currently popular, based on the live secondhand
+    listings feed (the dataset is sourced from public platforms: depop,
+    poshmark, thredUp). Optionally narrows to the user's size range.
+
+    Args:
+        size:     Optional size to narrow the feed to (matched like search).
+        listings: Optional listings to analyze. Defaults to load_listings().
+        top_n:    How many trending tags to return.
+
+    Returns:
+        A dict:
+        - size (str | None): the size scope requested
+        - scope (str): "size X" or "all listings"
+        - trending (list[tuple[str, int]]): (tag, count) pairs, most popular first
+        - tags (list[str]): just the trending tag names
+        - message (str): a human-readable summary
+
+    Never raises. Falls back to all listings if a size filter leaves nothing.
+    """
+    if listings is None:
+        listings = load_listings()
+
+    scope = "all listings"
+    pool = listings
+    if size is not None:
+        sized = [x for x in listings if _size_matches(size, x["size"])]
+        if sized:
+            pool = sized
+            scope = f"size {size}"
+
+    if not pool:
+        return {
+            "size": size,
+            "scope": scope,
+            "trending": [],
+            "tags": [],
+            "message": "No trend data available right now.",
+        }
+
+    counts = Counter(tag for x in pool for tag in x["style_tags"])
+    trending = counts.most_common(top_n)
+    tags = [tag for tag, _ in trending]
+    message = f"Trending right now in {scope}: {', '.join(tags)}."
+
+    return {
+        "size": size,
+        "scope": scope,
+        "trending": trending,
+        "tags": tags,
+        "message": message,
+    }

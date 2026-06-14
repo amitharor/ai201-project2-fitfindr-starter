@@ -50,7 +50,7 @@ It returns `[]`. The agent reads that empty list as the no-results branch, write
 
 <!-- Describe what this tool does in 1–2 sentences -->
 
-Takes the listing I picked plus my wardrobe and asks Groq (llama-3.3-70b-versatile) to put together one or two complete outfits that pair the new piece with things I already own, with a quick note on how to wear it.
+Takes the listing I picked plus my wardrobe and asks Groq (llama-3.3-70b-versatile) to put together one or two complete outfits that pair the new piece with things I already own, with a quick note on how to wear it. When trend data is passed in, it leans the look into the currently popular styles.
 
 **Input parameters:**
 
@@ -59,6 +59,8 @@ Takes the listing I picked plus my wardrobe and asks Groq (llama-3.3-70b-versati
 - `new_item` (dict): the listing I'm considering, straight from `search_results` (same fields as Tool 1's output).
 
 - `wardrobe` (dict): a dict with an `items` key holding a list of wardrobe item dicts. Each item has `id`, `name`, `category`, `colors`, `style_tags`, `notes`. The list can be empty.
+
+- `trends` (dict | None): optional output from `check_trends`; when given, the suggestion leans into the trending styles. None skips it.
 
 **What it returns:**
 
@@ -108,7 +110,36 @@ If `outfit` is empty or just whitespace, it returns a descriptive error message 
 
 <!-- Copy the block above for any tools beyond the required three -->
 
-None for the base project. Stretch tools (price check, retry-with-loosened-filters) would be added here, and I'll update this file before starting any of them.
+### Tool 4: compare_price (stretch)
+
+**What it does:**
+Looks at an item and estimates whether its price is fair, by comparing it against other listings in the same category (preferring ones that share a style tag).
+
+**Input parameters:**
+- `item` (dict): the listing to assess.
+- `listings` (list[dict] | None): listings to compare against. Defaults to the full dataset.
+
+**What it returns:**
+A dict with `verdict` ("great deal", "fair", "above average", or "unknown"), `item_price` (float), `comparable_median` (float | None), `comparable_count` (int), and a `message` (str) that explains the reasoning, like "$18 vs a typical $21.5 across 14 similar tops, so this price looks great deal."
+
+**What happens if it fails or returns nothing:**
+If there are fewer than 2 comparable listings, it returns the "unknown" verdict with a message saying it can't judge the price. It never raises.
+
+### Tool 5: check_trends (stretch)
+
+**What it does:**
+Surfaces what styles are currently popular by reading the live secondhand listings feed (the dataset is sourced from public platforms: depop, poshmark, thredUp), optionally narrowed to my size range.
+
+**Input parameters:**
+- `size` (str | None): size to narrow the feed to. None looks across all listings.
+- `listings` (list[dict] | None): listings to analyze. Defaults to the full dataset.
+- `top_n` (int): how many trending tags to return.
+
+**What it returns:**
+A dict with `size`, `scope` ("size M" or "all listings"), `trending` (list of (tag, count) pairs), `tags` (just the tag names), and a `message` like "Trending right now in size M: vintage, cottagecore, earth tones." The `tags` get passed into suggest_outfit so the outfit leans into them.
+
+**What happens if it fails or returns nothing:**
+If a size filter leaves nothing, it falls back to all listings. If there's no data at all, it returns an empty trend list with a "No trend data available right now" message. It never raises.
 
 ---
 
@@ -131,6 +162,11 @@ The loop runs inside `run_agent(query, wardrobe)` and works off the session dict
 9. Return the session.
 
 It knows it's done when it either hits the empty-results return in step 4 or finishes step 8 with a fit card in the session.
+
+**Stretch behavior folded into the loop:**
+- Retry with fallback: if `search_listings` returns nothing, the loop automatically retries with the size filter dropped, then with the price cap dropped, and records each loosening in `session["search_adjustments"]` so the user is told what changed.
+- Style memory: before searching, if the query has no size but a previous session saved one, the loop reuses it and notes that in `session["memory_note"]`. After a successful run it saves the size and favorite style tags back to disk.
+- Price + trends: after selecting the item, the loop calls `compare_price` and `check_trends`, then passes the trending tags into `suggest_outfit` so the styling reflects what's currently popular.
 
 ---
 
@@ -225,6 +261,15 @@ I'll use Claude. For each tool I'll paste that tool's block from this file (inpu
 **Milestone 4 — Planning loop and state management:**
 
 I'll give Claude the Planning Loop and State Management sections above plus the ASCII diagram and the agent.py stub, and ask it to implement `run_agent` following the numbered steps. Before running it I'll check that it branches on an empty `search_results` (early return, no `suggest_outfit` call), that it writes each result back into the session dict, and that it does not call all three tools unconditionally. I'll verify by running `python agent.py` and confirming the happy path fills `fit_card` while the no-results path sets `error` and leaves `fit_card` as None.
+
+---
+
+## Stretch Features
+
+- **Retry with fallback:** `_search_with_fallback` in agent.py loosens the search (drop size, then drop price) on a zero-result query and reports the adjustments.
+- **Price comparison:** `compare_price` returns a fairness verdict with reasoning from comparable listings.
+- **Trend awareness:** `check_trends` reads the listings feed (from depop/poshmark/thredUp) as the public-platform stand-in, since there's no free reliable fashion-trends API. Its tags are fed into `suggest_outfit`, so trends visibly shape the outfit.
+- **Style profile memory:** `utils/profile.py` stores a `preferred_size` and `favorite_tags` in `style_profile.json` (gitignored). A later session reuses them without me re-typing.
 
 ---
 

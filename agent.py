@@ -20,7 +20,19 @@ Usage (once implemented):
 
 import re
 
-from tools import search_listings, suggest_outfit, create_fit_card
+from tools import (
+    search_listings,
+    suggest_outfit,
+    create_fit_card,
+    compare_price,
+    check_trends,
+)
+from utils.profile import (
+    load_profile,
+    save_profile,
+    update_profile_from_run,
+    top_favorite_tags,
+)
 
 
 # ── query parsing ─────────────────────────────────────────────────────────────
@@ -85,12 +97,51 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "outfit_suggestion": None,   # string returned by suggest_outfit
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
+        # ── stretch-feature fields (additive) ──
+        "search_adjustments": [],    # notes on any loosened-search retries
+        "price_check": None,         # dict from compare_price()
+        "trends": None,              # dict from check_trends()
+        "memory_note": None,         # note about reused style preferences
     }
+
+
+# ── retry with fallback (stretch) ─────────────────────────────────────────────
+
+def _search_with_fallback(parsed: dict, session: dict) -> list[dict]:
+    """
+    Run search_listings, and if it finds nothing, automatically retry with
+    loosened constraints: first drop the size filter, then drop the price cap.
+    Records a human-readable note for each loosened attempt in
+    session["search_adjustments"].
+    """
+    desc, size, max_price = parsed["description"], parsed["size"], parsed["max_price"]
+
+    results = search_listings(desc, size, max_price)
+    if results:
+        return results
+
+    # Fallback 1: drop the size filter.
+    if size is not None:
+        results = search_listings(desc, None, max_price)
+        if results:
+            session["search_adjustments"].append(f"ignored the size filter ({size})")
+            return results
+
+    # Fallback 2: drop the price cap too.
+    if max_price is not None:
+        results = search_listings(desc, None, None)
+        if results:
+            if size is not None:
+                session["search_adjustments"].append(f"ignored the size filter ({size})")
+            session["search_adjustments"].append(f"removed the ${max_price:g} price cap")
+            return results
+
+    return []
 
 
 # ── planning loop ─────────────────────────────────────────────────────────────
 
-def run_agent(query: str, wardrobe: dict) -> dict:
+def run_agent(query: str, wardrobe: dict, use_memory: bool = True) -> dict:
     """
     Main agent entry point. Runs the FitFindr planning loop for a single
     user interaction and returns the completed session dict.
@@ -142,25 +193,45 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     session["parsed"] = _parse_query(query)
     parsed = session["parsed"]
 
-    # Step 3: search the listings with the parsed parameters.
-    session["search_results"] = search_listings(
-        parsed["description"], parsed["size"], parsed["max_price"]
-    )
+    # Step 2b (memory): reuse remembered preferences when the query omits them.
+    profile = None
+    if use_memory:
+        profile = load_profile()
+        notes = []
+        if parsed["size"] is None and profile.get("preferred_size"):
+            parsed["size"] = profile["preferred_size"]
+            notes.append(
+                f"Using your remembered size {profile['preferred_size']} "
+                "from a previous session."
+            )
+        favorites = top_favorite_tags(profile)
+        if favorites:
+            notes.append("I remember you like " + ", ".join(favorites) + ".")
+        if notes:
+            session["memory_note"] = " ".join(notes)
 
-    # Step 4: no matches -> set an error and stop. Do NOT call suggest_outfit.
+    # Step 3: search the listings, automatically loosening constraints if empty.
+    session["search_results"] = _search_with_fallback(parsed, session)
+
+    # Step 4: still no matches -> set an error and stop. Do NOT call suggest_outfit.
     if not session["search_results"]:
         session["error"] = (
-            "I couldn't find anything matching that. Try raising your max price, "
-            "dropping the size filter, or using simpler keywords."
+            "I couldn't find anything matching that, even after loosening the "
+            "size and price filters. Try simpler keywords or a different piece."
         )
         return session
 
     # Step 5: pick the top result and remember it in the session.
     session["selected_item"] = session["search_results"][0]
 
-    # Step 6: suggest an outfit using the selected item and the wardrobe.
+    # Step 5b (stretch): assess the price and check what's trending first, so the
+    # trend can shape the outfit suggestion.
+    session["price_check"] = compare_price(session["selected_item"])
+    session["trends"] = check_trends(parsed["size"])
+
+    # Step 6: suggest an outfit, leaning into the current trends.
     session["outfit_suggestion"] = suggest_outfit(
-        session["selected_item"], session["wardrobe"]
+        session["selected_item"], session["wardrobe"], trends=session["trends"]
     )
 
     # Step 7: guard against an empty suggestion before making a fit card.
@@ -175,6 +246,11 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     session["fit_card"] = create_fit_card(
         session["outfit_suggestion"], session["selected_item"]
     )
+
+    # Step 8b (memory): persist preferences from this run for next time.
+    if use_memory and profile is not None:
+        update_profile_from_run(profile, parsed)
+        save_profile(profile)
 
     # Step 9: hand the completed session back.
     return session

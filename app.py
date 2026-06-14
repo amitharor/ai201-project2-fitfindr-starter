@@ -70,6 +70,20 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
         f"Brand: {brand}\n\n"
         f"{item['description']}"
     )
+
+    # Stretch extras: memory note, loosened-search notes, price check, trends.
+    extras = []
+    if session.get("memory_note"):
+        extras.append(f"🧠 {session['memory_note']}")
+    if session.get("search_adjustments"):
+        extras.append("🔁 Loosened search: " + "; ".join(session["search_adjustments"]) + ".")
+    if session.get("price_check") and session["price_check"].get("message"):
+        extras.append(f"💰 {session['price_check']['message']}")
+    if session.get("trends") and session["trends"].get("message"):
+        extras.append(f"📈 {session['trends']['message']}")
+    if extras:
+        listing_text += "\n\n" + "\n".join(extras)
+
     return listing_text, session["outfit_suggestion"], session["fit_card"]
 
 

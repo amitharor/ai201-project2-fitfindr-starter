@@ -12,8 +12,16 @@ import os
 
 import pytest
 
-from tools import search_listings, suggest_outfit, create_fit_card
-from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
+from tools import (
+    search_listings,
+    suggest_outfit,
+    create_fit_card,
+    compare_price,
+    check_trends,
+)
+from agent import _search_with_fallback
+from utils.data_loader import get_example_wardrobe, get_empty_wardrobe, load_listings
+from utils.profile import load_profile, save_profile, update_profile_from_run
 
 
 # ── search_listings ─────────────────────────────────────────────────────────
@@ -55,3 +63,62 @@ def test_suggest_outfit_empty_wardrobe():
     result = suggest_outfit(item, get_empty_wardrobe())
     assert isinstance(result, str)
     assert result.strip() != ""
+
+
+# ── stretch: compare_price ───────────────────────────────────────────────────
+
+def test_compare_price_deal():
+    # A very cheap top should read as a great deal versus comparable tops.
+    cheap = {"id": "synthetic", "category": "tops", "price": 1.0,
+             "style_tags": ["vintage"]}
+    result = compare_price(cheap)
+    assert result["verdict"] == "great deal"
+    assert "$" in result["message"]
+
+
+def test_compare_price_returns_reasoning():
+    item = search_listings("vintage graphic tee", size=None, max_price=50)[0]
+    result = compare_price(item)
+    assert result["verdict"] in {"great deal", "fair", "above average", "unknown"}
+    assert isinstance(result["message"], str) and result["message"]
+
+
+def test_compare_price_unknown_when_no_comparables():
+    # A category with no other listings cannot be judged.
+    odd = {"id": "synthetic", "category": "costume", "price": 50.0, "style_tags": []}
+    result = compare_price(odd)
+    assert result["verdict"] == "unknown"
+    assert result["comparable_median"] is None
+
+
+# ── stretch: check_trends ────────────────────────────────────────────────────
+
+def test_check_trends_top_tag():
+    result = check_trends(None)
+    assert "vintage" in result["tags"]
+    assert result["message"]
+
+
+# ── stretch: retry with fallback ─────────────────────────────────────────────
+
+def test_retry_fallback_drops_size():
+    # Size "ZZ" matches nothing; the fallback should drop it and still find items.
+    parsed = {"description": "track jacket", "size": "ZZ", "max_price": 80.0}
+    session = {"search_adjustments": []}
+    results = _search_with_fallback(parsed, session)
+    assert len(results) > 0
+    assert any("size" in note for note in session["search_adjustments"])
+
+
+# ── stretch: style profile memory ────────────────────────────────────────────
+
+def test_profile_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("FITFINDR_PROFILE", str(tmp_path / "profile.json"))
+    profile = load_profile()
+    update_profile_from_run(profile, {"description": "vintage tee", "size": "M"})
+    save_profile(profile)
+
+    reloaded = load_profile()
+    assert reloaded["preferred_size"] == "M"
+    assert reloaded["favorite_tags"].get("vintage") == 1
+    assert reloaded["runs"] == 1
