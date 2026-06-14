@@ -13,6 +13,7 @@ Tools:
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -20,6 +21,8 @@ from groq import Groq
 from utils.data_loader import load_listings
 
 load_dotenv()
+
+MODEL = "llama-3.3-70b-versatile"
 
 
 # ── Groq client ───────────────────────────────────────────────────────────────
@@ -32,6 +35,22 @@ def _get_groq_client():
             "GROQ_API_KEY not set. Add it to a .env file in the project root."
         )
     return Groq(api_key=api_key)
+
+
+def _call_llm(prompt: str, temperature: float, max_tokens: int = 400) -> str:
+    """Send a single-message prompt to Groq and return the response text."""
+    client = _get_groq_client()
+    resp = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return resp.choices[0].message.content.strip()
+
+
+# Common words to ignore when scoring keyword overlap.
+_STOPWORDS = {"the", "and", "for", "with", "an", "of", "in", "to", "my", "i", "a"}
 
 
 # ── Tool 1: search_listings ───────────────────────────────────────────────────
@@ -69,8 +88,49 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+
+    # 1. Filter by price ceiling (inclusive) if provided.
+    if max_price is not None:
+        listings = [item for item in listings if item["price"] <= max_price]
+
+    # 2. Filter by size (case-insensitive) if provided.
+    if size is not None:
+        wanted = size.strip().lower()
+        kept = []
+        for item in listings:
+            listing_size = item["size"].lower()
+            tokens = re.split(r"[\s/]+", listing_size)
+            if wanted in tokens or wanted in listing_size:
+                kept.append(item)
+        listings = kept
+
+    # 3. Score remaining listings by keyword overlap with the description.
+    query_tokens = {
+        tok
+        for tok in re.findall(r"[a-z0-9]+", description.lower())
+        if len(tok) >= 2 and tok not in _STOPWORDS
+    }
+
+    scored = []
+    for item in listings:
+        blob = " ".join(
+            [
+                item["title"],
+                item["description"],
+                " ".join(item["style_tags"]),
+                item["category"],
+                " ".join(item["colors"]),
+                item["brand"] or "",
+            ]
+        ).lower()
+        score = sum(1 for tok in query_tokens if tok in blob)
+        if score > 0:
+            scored.append((score, item))
+
+    # 4. Sort by score, highest first (stable sort keeps dataset order on ties).
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [item for _, item in scored]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -100,8 +160,47 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    item_desc = (
+        f"{new_item['title']} (category: {new_item['category']}, "
+        f"colors: {', '.join(new_item['colors'])}, "
+        f"style: {', '.join(new_item['style_tags'])})"
+    )
+
+    items = wardrobe.get("items", []) if wardrobe else []
+
+    if not items:
+        # Empty wardrobe: fall back to general styling advice for the item.
+        prompt = (
+            "You are a thoughtful personal stylist. The shopper has no wardrobe "
+            "saved yet, so give general styling advice for this thrifted piece.\n\n"
+            f"Item: {item_desc}\n\n"
+            "In 3 to 5 sentences, describe what kinds of pieces pair well with it, "
+            "the vibe it suits, and one specific way to wear it. Be concrete and warm."
+        )
+    else:
+        wardrobe_lines = "\n".join(
+            f"- {it['name']} ({it['category']}; {', '.join(it['style_tags'])})"
+            + (f"; note: {it['notes']}" if it.get("notes") else "")
+            for it in items
+        )
+        prompt = (
+            "You are a thoughtful personal stylist. Build outfits for the shopper "
+            "using their new thrifted item plus pieces they already own.\n\n"
+            f"New item: {item_desc}\n\n"
+            f"Their wardrobe:\n{wardrobe_lines}\n\n"
+            "Suggest 1 or 2 complete outfits that pair the new item with specific "
+            "named pieces from their wardrobe. For each, add one quick styling tip "
+            "(how to tuck, layer, roll, etc.). Keep it concise and concrete."
+        )
+
+    try:
+        return _call_llm(prompt, temperature=0.7)
+    except Exception:
+        return (
+            f"I couldn't reach the styling model just now, but {new_item['title']} "
+            "is versatile. Pair it with simple, neutral basics and a shoe that "
+            "matches its vibe, then build around the colors you already wear most."
+        )
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -133,5 +232,29 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    # Guard against missing/empty outfit input — no LLM call needed.
+    if not outfit or not outfit.strip():
+        return (
+            "I can't write a fit card without an outfit yet. "
+            "Run suggest_outfit first, then try again."
+        )
+
+    prompt = (
+        "Write a short, shareable outfit caption for a thrifted find, the kind of "
+        "thing someone posts with an OOTD photo. Make it sound casual and real, not "
+        "like a product description.\n\n"
+        f"Item: {new_item['title']}\n"
+        f"Price: ${new_item['price']}\n"
+        f"Platform: {new_item['platform']}\n"
+        f"Outfit: {outfit}\n\n"
+        "Write 2 to 4 sentences. Mention the item name, price, and platform once "
+        "each, naturally. Capture the vibe in specific terms. Emojis are welcome."
+    )
+
+    try:
+        return _call_llm(prompt, temperature=1.0)
+    except Exception:
+        return (
+            f"thrifted this {new_item['title']} off {new_item['platform']} for "
+            f"${new_item['price']} and it fits the vibe perfectly. full look soon ✨"
+        )
